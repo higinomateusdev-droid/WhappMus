@@ -67,7 +67,8 @@ export async function ensureWorkspace(userId: number) {
   const [settings] = await db.select().from(aiSettings).where(eq(aiSettings.userId, userId)).limit(1);
   if (!settings) await db.insert(aiSettings).values({ userId });
   const [session] = await db.select().from(whatsappSessions).where(eq(whatsappSessions.userId, userId)).limit(1);
-  if (!session) await db.insert(whatsappSessions).values({ userId, instanceName: `turnstark-${userId}`, provider: process.env.WHATSAPP_PROVIDER ?? "evolution" });
+  if (!session) await db.insert(whatsappSessions).values({ userId, instanceName: `turnstark-${userId}`, provider: "baileys" });
+  else if (session.provider !== "baileys") await db.update(whatsappSessions).set({ provider: "baileys" }).where(eq(whatsappSessions.id, session.id));
   return true;
 }
 

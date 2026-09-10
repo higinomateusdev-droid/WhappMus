@@ -15,6 +15,13 @@
       "when": 1789068758358,
       "tag": "0001_chemical_omega_sentinel",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1789071109282,
+      "tag": "0002_bored_hiroim",
+      "breakpoints": true
     }
   ]
 }

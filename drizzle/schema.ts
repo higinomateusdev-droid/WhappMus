@@ -23,7 +23,7 @@ export const users = mysqlTable("users", {
 export const whatsappSessions = mysqlTable("whatsapp_sessions", {
   id: int("id").autoincrement().primaryKey(),
   userId: int("userId").notNull(),
-  provider: varchar("provider", { length: 32 }).default("evolution").notNull(),
+  provider: varchar("provider", { length: 32 }).default("baileys").notNull(),
   instanceName: varchar("instanceName", { length: 120 }).notNull(),
   status: mysqlEnum("status", ["disconnected", "connecting", "connected", "error"]).default("disconnected").notNull(),
   phoneNumber: varchar("phoneNumber", { length: 64 }),

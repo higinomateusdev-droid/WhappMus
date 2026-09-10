@@ -1,0 +1,1 @@
+ALTER TABLE `whatsapp_sessions` MODIFY COLUMN `provider` varchar(32) NOT NULL DEFAULT 'baileys';

@@ -8,7 +8,7 @@ import { addSystemLog, aiAgents, aiSettings, conversations, getConversationMessa
 import { connectWhatsApp, disconnectWhatsApp, getConnectionDiagnostics, getMissingWhatsAppConfig, isWhatsAppConfigured, refreshWhatsAppStatus, sendWhatsAppMessage } from "./whatsapp";
 import { and, eq } from "drizzle-orm";
 
-const configResponse = () => ({ configured: isWhatsAppConfigured(), missing: getMissingWhatsAppConfig(), provider: process.env.WHATSAPP_PROVIDER ?? "evolution" });
+const configResponse = () => ({ configured: isWhatsAppConfigured(), missing: getMissingWhatsAppConfig(), provider: "baileys", runtime: "direct-whatsapp-web" });
 
 function currentUserId(ctx: { user: { id: number } }) { return ctx.user.id; }
 

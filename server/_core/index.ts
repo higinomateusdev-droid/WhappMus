@@ -8,7 +8,7 @@ import { registerStorageProxy } from "./storageProxy";
 import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
-import { handleWhatsAppWebhook } from "../whatsapp";
+import { resumeWhatsAppSessions } from "../whatsapp";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -33,26 +33,16 @@ async function startServer() {
   registerStorageProxy(app);
   registerOAuthRoutes(app);
 
-  app.post("/api/whatsapp/webhook", async (req, res) => {
-    const configuredSecret = process.env.WHATSAPP_WEBHOOK_SECRET;
-    const providedSecret = req.header("x-webhook-secret") || req.header("x-evolution-webhook-secret");
-    if (configuredSecret && providedSecret !== configuredSecret) return res.sendStatus(401);
-    try {
-      const result = await handleWhatsAppWebhook(req.body);
-      return res.status(result.accepted ? 200 : 202).json(result);
-    } catch (error) {
-      console.error("[WhatsApp webhook]", error);
-      return res.sendStatus(500);
-    }
-  });
-
   app.use("/api/trpc", createExpressMiddleware({ router: appRouter, createContext }));
   if (process.env.NODE_ENV === "development") await setupVite(app, server);
   else serveStatic(app);
   const preferredPort = parseInt(process.env.PORT || "3000");
   const port = await findAvailablePort(preferredPort);
   if (port !== preferredPort) console.log(`Port ${preferredPort} is busy, using port ${port} instead`);
-  server.listen(port, () => console.log(`Server running on http://localhost:${port}/`));
+  server.listen(port, () => {
+    console.log(`Server running on http://localhost:${port}/`);
+    void resumeWhatsAppSessions();
+  });
 }
 
 startServer().catch(console.error);
