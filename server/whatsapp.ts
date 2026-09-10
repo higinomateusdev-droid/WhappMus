@@ -1,5 +1,5 @@
 import { and, desc, eq, inArray } from "drizzle-orm";
-import makeWASocket, { Browsers, DisconnectReason, useMultiFileAuthState, type WASocket } from "@whiskeysockets/baileys";
+import makeWASocket, { Browsers, DisconnectReason, fetchLatestBaileysVersion, useMultiFileAuthState, type WASocket } from "@whiskeysockets/baileys";
 import { Boom } from "@hapi/boom";
 import QRCode from "qrcode";
 import pino from "pino";
@@ -11,7 +11,7 @@ const authRoot = process.env.BAILEYS_AUTH_DIR || ".data/baileys-auth";
 const sockets = new Map<number, WASocket>();
 const reconnectTimers = new Map<number, NodeJS.Timeout>();
 const qrWaiters = new Map<number, { resolve: (value: { qrCode: string; qrExpiresAt: Date }) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
-const logger = pino({ level: "silent" });
+const logger = pino({ level: process.env.NODE_ENV === "production" ? "warn" : "info" });
 
 export type DirectWhatsAppDiagnostics = {
   provider: "baileys";
@@ -83,7 +83,14 @@ async function startSocket(userId: number) {
   if (sockets.has(userId)) return sockets.get(userId)!;
   await ensureWorkspace(userId);
   const { state, saveCreds } = await useMultiFileAuthState(authPath(userId));
-  const socket = makeWASocket({ auth: state, browser: Browsers.macOS("Desktop"), logger, markOnlineOnConnect: false, printQRInTerminal: false });
+  let version: [number, number, number] | undefined;
+  try {
+    const latest = await fetchLatestBaileysVersion();
+    version = latest.version;
+  } catch (error) {
+    await addSystemLog(userId, "whatsapp.version_lookup_failed", String(error), "warning");
+  }
+  const socket = makeWASocket({ auth: state, ...(version ? { version } : {}), browser: Browsers.ubuntu("Turnstark Lab"), logger, markOnlineOnConnect: false, printQRInTerminal: false, connectTimeoutMs: 60_000, keepAliveIntervalMs: 25_000 });
   sockets.set(userId, socket);
   socket.ev.on("creds.update", saveCreds);
   socket.ev.on("connection.update", async ({ connection, lastDisconnect, qr }) => {
@@ -106,15 +113,18 @@ async function startSocket(userId: number) {
     }
     if (connection === "close") {
       sockets.delete(userId);
-      const code = (lastDisconnect?.error as Boom)?.output?.statusCode;
+      const disconnectError = lastDisconnect?.error as Boom | Error | undefined;
+      const code = (disconnectError as Boom)?.output?.statusCode;
       const loggedOut = code === DisconnectReason.loggedOut;
-      await persistSession(userId, { status: loggedOut ? "disconnected" : "error", qrCode: null, qrExpiresAt: null, errorMessage: loggedOut ? "Sessão encerrada pelo WhatsApp." : "Conexão encerrada; tentando reconectar." });
-      await addSystemLog(userId, loggedOut ? "whatsapp.disconnected" : "whatsapp.reconnecting", loggedOut ? "Sessão deslogada." : "Baileys tentará reconectar.", loggedOut ? "warning" : "info");
+      const reason = disconnectError instanceof Error ? disconnectError.message : "motivo desconhecido";
+      const detail = `Código ${code ?? "n/d"}: ${reason}`;
+      await persistSession(userId, { status: loggedOut ? "disconnected" : "error", qrCode: null, qrExpiresAt: null, errorMessage: loggedOut ? "Sessão encerrada pelo WhatsApp." : `Conexão encerrada (${detail}). Clique em Gerar novo QR.` });
+      await addSystemLog(userId, loggedOut ? "whatsapp.disconnected" : "whatsapp.reconnecting", detail, loggedOut ? "warning" : "error");
       const waiter = qrWaiters.get(userId);
       if (waiter) {
         clearTimeout(waiter.timer);
         qrWaiters.delete(userId);
-        waiter.reject(new Error(loggedOut ? "O WhatsApp encerrou esta sessão. Gere um novo QR." : "A conexão com o WhatsApp foi encerrada antes do QR aparecer."));
+        waiter.reject(new Error(loggedOut ? "O WhatsApp encerrou esta sessão. Gere um novo QR." : `A conexão foi encerrada antes do QR (${detail}).`));
       }
       if (!loggedOut && !reconnectTimers.has(userId)) {
         const timer = setTimeout(() => { reconnectTimers.delete(userId); void startSocket(userId); }, 2000);
