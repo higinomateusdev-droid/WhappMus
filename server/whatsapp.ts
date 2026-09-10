@@ -6,10 +6,11 @@ import pino from "pino";
 import { invokeLLM } from "./_core/llm";
 import { addSystemLog, aiAgents, aiLogs, aiSettings, contacts, conversations, ensureWorkspace, getDb, messages, whatsappSessions } from "./db";
 
-const QR_TTL_MS = 60_000;
+const QR_TTL_MS = 120_000;
 const authRoot = process.env.BAILEYS_AUTH_DIR || ".data/baileys-auth";
 const sockets = new Map<number, WASocket>();
 const reconnectTimers = new Map<number, NodeJS.Timeout>();
+const qrWaiters = new Map<number, { resolve: (value: { qrCode: string; qrExpiresAt: Date }) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
 const logger = pino({ level: "silent" });
 
 export type DirectWhatsAppDiagnostics = {
@@ -91,6 +92,12 @@ async function startSocket(userId: number) {
       const qrExpiresAt = new Date(Date.now() + QR_TTL_MS);
       await persistSession(userId, { status: "connecting", qrCode, qrExpiresAt, errorMessage: null, lastSyncAt: new Date() });
       await addSystemLog(userId, "whatsapp.qr_requested", "QR real recebido diretamente do WhatsApp Web via Baileys.");
+      const waiter = qrWaiters.get(userId);
+      if (waiter) {
+        clearTimeout(waiter.timer);
+        qrWaiters.delete(userId);
+        waiter.resolve({ qrCode, qrExpiresAt });
+      }
     }
     if (connection === "open") {
       const phoneNumber = asPhone(socket.user?.id);
@@ -103,6 +110,12 @@ async function startSocket(userId: number) {
       const loggedOut = code === DisconnectReason.loggedOut;
       await persistSession(userId, { status: loggedOut ? "disconnected" : "error", qrCode: null, qrExpiresAt: null, errorMessage: loggedOut ? "Sessão encerrada pelo WhatsApp." : "Conexão encerrada; tentando reconectar." });
       await addSystemLog(userId, loggedOut ? "whatsapp.disconnected" : "whatsapp.reconnecting", loggedOut ? "Sessão deslogada." : "Baileys tentará reconectar.", loggedOut ? "warning" : "info");
+      const waiter = qrWaiters.get(userId);
+      if (waiter) {
+        clearTimeout(waiter.timer);
+        qrWaiters.delete(userId);
+        waiter.reject(new Error(loggedOut ? "O WhatsApp encerrou esta sessão. Gere um novo QR." : "A conexão com o WhatsApp foi encerrada antes do QR aparecer."));
+      }
       if (!loggedOut && !reconnectTimers.has(userId)) {
         const timer = setTimeout(() => { reconnectTimers.delete(userId); void startSocket(userId); }, 2000);
         reconnectTimers.set(userId, timer);
@@ -118,10 +131,28 @@ async function startSocket(userId: number) {
 
 export async function connectWhatsApp(userId: number) {
   try {
-    const socket = await startSocket(userId);
     const db = await getDb();
     const [session] = db ? await db.select().from(whatsappSessions).where(eq(whatsappSessions.userId, userId)).limit(1) : [];
-    return { status: session?.status === "connected" || socket.user ? "connected" as const : "connecting" as const, qrCode: session?.qrCode || null, qrExpiresAt: session?.qrExpiresAt || null, provider: "baileys" as const };
+    const hasValidQr = Boolean(session?.qrCode && session.qrExpiresAt && session.qrExpiresAt.getTime() > Date.now());
+    const shouldRenewQr = Boolean(session?.status !== "connected" && !hasValidQr);
+    if (shouldRenewQr) {
+      const existing = sockets.get(userId);
+      if (existing) {
+        try { existing.end(undefined); } catch { /* socket already closed */ }
+        sockets.delete(userId);
+      }
+      await persistSession(userId, { status: "disconnected", qrCode: null, qrExpiresAt: null, errorMessage: null });
+    }
+    const socket = await startSocket(userId);
+    const current = await getDb();
+    const [latest] = current ? await current.select().from(whatsappSessions).where(eq(whatsappSessions.userId, userId)).limit(1) : [];
+    if (socket.user || latest?.status === "connected") return { status: "connected" as const, qrCode: null, qrExpiresAt: null, provider: "baileys" as const };
+    if (latest?.qrCode && latest.qrExpiresAt && latest.qrExpiresAt.getTime() > Date.now()) return { status: "connecting" as const, qrCode: latest.qrCode, qrExpiresAt: latest.qrExpiresAt, provider: "baileys" as const };
+    const qr = await new Promise<{ qrCode: string; qrExpiresAt: Date }>((resolve, reject) => {
+      const timer = setTimeout(() => { qrWaiters.delete(userId); reject(new Error("O WhatsApp não entregou o QR Code em 15 segundos. Clique em Gerar novo QR e tente novamente.")); }, 15_000);
+      qrWaiters.set(userId, { resolve, reject, timer });
+    });
+    return { status: "connecting" as const, qrCode: qr.qrCode, qrExpiresAt: qr.qrExpiresAt, provider: "baileys" as const };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Falha ao iniciar sessão direta WhatsApp Web.";
     await persistSession(userId, { status: "error", errorMessage: message });
