@@ -5,7 +5,7 @@ import { systemRouter } from "./_core/systemRouter";
 import { invokeLLM } from "./_core/llm";
 import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
 import { addSystemLog, aiAgents, aiSettings, conversations, getConversationMessages, getConversations, getCounts, getRecentLogs, getWorkspace, ensureWorkspace, getDb, messages, whatsappSessions } from "./db";
-import { connectWhatsApp, disconnectWhatsApp, getMissingWhatsAppConfig, isWhatsAppConfigured, sendWhatsAppMessage } from "./whatsapp";
+import { connectWhatsApp, disconnectWhatsApp, getConnectionDiagnostics, getMissingWhatsAppConfig, isWhatsAppConfigured, refreshWhatsAppStatus, sendWhatsAppMessage } from "./whatsapp";
 import { and, eq } from "drizzle-orm";
 
 const configResponse = () => ({ configured: isWhatsAppConfigured(), missing: getMissingWhatsAppConfig(), provider: process.env.WHATSAPP_PROVIDER ?? "evolution" });
@@ -59,6 +59,8 @@ export const appRouter = router({
     connect: protectedProcedure.mutation(({ ctx }) => connectWhatsApp(currentUserId(ctx))),
     reconnect: protectedProcedure.mutation(({ ctx }) => connectWhatsApp(currentUserId(ctx))),
     disconnect: protectedProcedure.mutation(({ ctx }) => disconnectWhatsApp(currentUserId(ctx))),
+    refresh: protectedProcedure.mutation(({ ctx }) => refreshWhatsAppStatus(currentUserId(ctx))),
+    diagnostics: protectedProcedure.query(({ ctx }) => getConnectionDiagnostics(currentUserId(ctx))),
   }),
   conversations: router({
     list: protectedProcedure.query(({ ctx }) => getConversations(currentUserId(ctx))),

@@ -6,6 +6,7 @@ const original = {
   apiKey: process.env.WHATSAPP_API_KEY,
   instanceName: process.env.WHATSAPP_INSTANCE_NAME,
   webhookSecret: process.env.WHATSAPP_WEBHOOK_SECRET,
+  publicAppUrl: process.env.PUBLIC_APP_URL,
 };
 
 afterEach(() => {
@@ -14,6 +15,7 @@ afterEach(() => {
     WHATSAPP_API_KEY: original.apiKey,
     WHATSAPP_INSTANCE_NAME: original.instanceName,
     WHATSAPP_WEBHOOK_SECRET: original.webhookSecret,
+    PUBLIC_APP_URL: original.publicAppUrl,
   })) {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
@@ -30,6 +32,8 @@ describe("WhatsApp adapter configuration", () => {
       "WHATSAPP_API_URL",
       "WHATSAPP_API_KEY",
       "WHATSAPP_INSTANCE_NAME",
+      "PUBLIC_APP_URL",
+      "WHATSAPP_WEBHOOK_SECRET",
     ]);
     expect(isWhatsAppConfigured()).toBe(false);
   });
@@ -38,6 +42,8 @@ describe("WhatsApp adapter configuration", () => {
     process.env.WHATSAPP_API_URL = "https://provider.example.test";
     process.env.WHATSAPP_API_KEY = "server-only-key";
     process.env.WHATSAPP_INSTANCE_NAME = "turnstark-main";
+    process.env.PUBLIC_APP_URL = "https://turnstark.example.test";
+    process.env.WHATSAPP_WEBHOOK_SECRET = "turnstark-secret";
 
     expect(getMissingWhatsAppConfig()).toEqual([]);
     expect(isWhatsAppConfigured()).toBe(true);

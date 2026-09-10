@@ -8,7 +8,7 @@ import { registerStorageProxy } from "./storageProxy";
 import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
-import { handleWhatsAppWebhook, verifyWebhookToken } from "../whatsapp";
+import { handleWhatsAppWebhook } from "../whatsapp";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -33,18 +33,10 @@ async function startServer() {
   registerStorageProxy(app);
   registerOAuthRoutes(app);
 
-  app.get("/api/whatsapp/webhook", (req, res) => {
-    const mode = String(req.query["hub.mode"] ?? "");
-    const token = String(req.query["hub.verify_token"] ?? "");
-    const challenge = String(req.query["hub.challenge"] ?? "");
-    if (mode === "subscribe" && verifyWebhookToken(token)) return res.status(200).send(challenge);
-    return res.sendStatus(403);
-  });
-
   app.post("/api/whatsapp/webhook", async (req, res) => {
     const configuredSecret = process.env.WHATSAPP_WEBHOOK_SECRET;
     const providedSecret = req.header("x-webhook-secret") || req.header("x-evolution-webhook-secret");
-    if (configuredSecret && providedSecret && configuredSecret !== providedSecret) return res.sendStatus(401);
+    if (configuredSecret && providedSecret !== configuredSecret) return res.sendStatus(401);
     try {
       const result = await handleWhatsAppWebhook(req.body);
       return res.status(result.accepted ? 200 : 202).json(result);
