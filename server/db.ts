@@ -6,6 +6,7 @@ import {
   aiSettings,
   contacts,
   conversations,
+  knowledgeItems,
   InsertUser,
   messages,
   systemLogs,
@@ -107,6 +108,12 @@ export async function getRecentLogs(userId: number) {
   return db.select().from(systemLogs).where(eq(systemLogs.userId, userId)).orderBy(desc(systemLogs.createdAt)).limit(40);
 }
 
+export async function getKnowledgeItems(userId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select().from(knowledgeItems).where(eq(knowledgeItems.userId, userId)).orderBy(desc(knowledgeItems.updatedAt));
+}
+
 export async function addSystemLog(userId: number, event: string, detail?: string, level: "info" | "warning" | "error" = "info") {
   const db = await getDb();
   if (!db) return;
@@ -121,4 +128,4 @@ export async function getCounts(userId: number) {
   return { received: allMessages.filter(message => message.direction === "inbound").length, aiReplies: allMessages.filter(message => message.aiGenerated).length, activeConversations: active.length };
 }
 
-export { aiAgents, aiLogs, aiSettings, contacts, conversations, messages, systemLogs, users, whatsappSessions };
+export { aiAgents, aiLogs, aiSettings, contacts, conversations, knowledgeItems, messages, systemLogs, users, whatsappSessions };

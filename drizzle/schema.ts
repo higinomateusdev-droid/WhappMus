@@ -1,6 +1,7 @@
 import {
   boolean,
   int,
+  longtext,
   mysqlEnum,
   mysqlTable,
   text,
@@ -75,13 +76,30 @@ export const aiAgents = mysqlTable("ai_agents", {
   id: int("id").autoincrement().primaryKey(),
   userId: int("userId").notNull(),
   name: varchar("name", { length: 120 }).default("Nova").notNull(),
-  personality: text("personality").notNull(),
+  personality: longtext("personality").notNull(),
   tone: varchar("tone", { length: 80 }).default("Calmo e acolhedor").notNull(),
   formality: varchar("formality", { length: 40 }).default("Equilibrada").notNull(),
-  instructions: text("instructions").notNull(),
-  guardrails: text("guardrails").notNull(),
-  blockedPhrases: text("blockedPhrases").notNull(),
+  instructions: longtext("instructions").notNull(),
+  guardrails: longtext("guardrails").notNull(),
+  blockedPhrases: longtext("blockedPhrases").notNull(),
   model: varchar("model", { length: 120 }).default("platform-default").notNull(),
+  enabled: boolean("enabled").default(true).notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+});
+
+export const knowledgeItems = mysqlTable("knowledge_items", {
+  id: int("id").autoincrement().primaryKey(),
+  userId: int("userId").notNull(),
+  kind: mysqlEnum("kind", ["document", "faq"]).notNull(),
+  title: varchar("title", { length: 240 }).notNull(),
+  question: longtext("question"),
+  content: longtext("content").notNull(),
+  storageKey: varchar("storageKey", { length: 500 }),
+  storageUrl: varchar("storageUrl", { length: 700 }),
+  mimeType: varchar("mimeType", { length: 160 }),
+  fileName: varchar("fileName", { length: 255 }),
+  fileSize: int("fileSize"),
   enabled: boolean("enabled").default(true).notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
@@ -123,4 +141,5 @@ export type Conversation = typeof conversations.$inferSelect;
 export type Message = typeof messages.$inferSelect;
 export type AiAgent = typeof aiAgents.$inferSelect;
 export type AiSetting = typeof aiSettings.$inferSelect;
+export type KnowledgeItem = typeof knowledgeItems.$inferSelect;
 export type SystemLog = typeof systemLogs.$inferSelect;

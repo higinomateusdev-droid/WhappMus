@@ -4,7 +4,7 @@ import { Boom } from "@hapi/boom";
 import QRCode from "qrcode";
 import pino from "pino";
 import { invokeLLM } from "./_core/llm";
-import { addSystemLog, aiAgents, aiLogs, aiSettings, contacts, conversations, ensureWorkspace, getDb, messages, whatsappSessions } from "./db";
+import { addSystemLog, aiAgents, aiLogs, aiSettings, contacts, conversations, ensureWorkspace, getDb, knowledgeItems, messages, whatsappSessions } from "./db";
 
 const QR_TTL_MS = 120_000;
 const authRoot = process.env.BAILEYS_AUTH_DIR || ".data/baileys-auth";
@@ -25,6 +25,10 @@ export type DirectWhatsAppDiagnostics = {
 function authPath(userId: number) { return `${authRoot}/user-${userId}`; }
 function asPhone(jid?: string | null) { return jid ? jid.split("@")[0].split(":")[0] : null; }
 function messageText(message: any) { return message?.conversation || message?.extendedTextMessage?.text || message?.imageMessage?.caption || message?.videoMessage?.caption || ""; }
+function knowledgeContext(items: Array<{ title: string; question?: string | null; content: string }>) {
+  const text = items.map(item => `### ${item.title}${item.question ? `\nPergunta: ${item.question}` : ""}\n${item.content}`).join("\n\n");
+  return text ? `\n\nBASE DE CONHECIMENTO DO NEGÓCIO:\n${text}` : "";
+}
 
 async function persistSession(userId: number, values: Record<string, unknown>) {
   const db = await getDb();
@@ -60,11 +64,12 @@ async function recordInbound(userId: number, msg: any) {
   await addSystemLog(userId, "message.received", `${waId}: ${text}`);
   const [settings] = await db.select().from(aiSettings).where(eq(aiSettings.userId, userId)).limit(1);
   const [agent] = await db.select().from(aiAgents).where(eq(aiAgents.userId, userId)).limit(1);
+  const knowledge = await db.select().from(knowledgeItems).where(and(eq(knowledgeItems.userId, userId), eq(knowledgeItems.enabled, true)));
   if (!settings?.autoReplyEnabled || settings.globalPaused || !agent?.enabled) return;
   const context = await db.select().from(messages).where(and(eq(messages.userId, userId), eq(messages.conversationId, conversation.id))).orderBy(desc(messages.createdAt)).limit(12);
   const started = Date.now();
   try {
-    const completion = await invokeLLM({ messages: [{ role: "system", content: `${agent.name} é um agente de WhatsApp Web. Personalidade: ${agent.personality}. Tom: ${agent.tone}. Formalidade: ${agent.formality}. Instruções: ${agent.instructions}. Regras: ${agent.guardrails}. Nunca envie: ${agent.blockedPhrases || "nada especificado"}. Responda apenas com a mensagem final.` }, ...context.reverse().map(item => ({ role: item.direction === "inbound" ? "user" as const : "assistant" as const, content: item.text }))] });
+    const completion = await invokeLLM({ messages: [{ role: "system", content: `${agent.name} é um agente de WhatsApp Web. Personalidade: ${agent.personality}. Tom: ${agent.tone}. Formalidade: ${agent.formality}. Instruções: ${agent.instructions}. Regras: ${agent.guardrails}. Nunca envie: ${agent.blockedPhrases || "nada especificado"}.${knowledgeContext(knowledge)} Responda apenas com a mensagem final.` }, ...context.reverse().map(item => ({ role: item.direction === "inbound" ? "user" as const : "assistant" as const, content: item.text }))] });
     const responseText = typeof completion.choices[0]?.message.content === "string" ? completion.choices[0].message.content : "Não consegui gerar uma resposta agora.";
     const socket = sockets.get(userId);
     const sent = Boolean(socket && socket.user);
