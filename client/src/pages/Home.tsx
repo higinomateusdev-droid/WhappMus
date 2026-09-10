@@ -105,7 +105,7 @@ function WhatsAppView({ workspace, onRefresh }: { workspace: any; onRefresh: () 
   const config = workspace?.config;
   const diagnostics = trpc.whatsapp.diagnostics.useQuery(undefined, { refetchInterval: 4000 });
   const refreshStatus = trpc.whatsapp.refresh.useMutation({ onSuccess: () => { onRefresh(); void diagnostics.refetch(); }, onError: error => toast.error(error.message) });
-  const connect = trpc.whatsapp.connect.useMutation({ onSuccess: (result: any) => { if (result.status === "needs_configuration" || result.status === "error") toast.error(result.message || "Falha ao iniciar a sessão Baileys"); else if (result.status === "connected") { setRequestedQr(null); toast.success("WhatsApp conectado"); } else if (result.qrCode) { setRequestedQr({ qrCode: result.qrCode, qrExpiresAt: result.qrExpiresAt }); toast.success("QR Code pronto para escanear"); } else toast.error("O WhatsApp não entregou um QR Code. Clique em Gerar novo QR."); onRefresh(); void diagnostics.refetch(); }, onError: error => toast.error(error.message) });
+  const connect = trpc.whatsapp.connect.useMutation({ onSuccess: (result: any) => { if (result.status === "needs_configuration" || result.status === "error") toast.error(result.message || "Falha ao iniciar a sessão Baileys"); else if (result.status === "connected") { setRequestedQr(null); toast.success("WhatsApp conectado"); } else if (result.qrCode) { setRequestedQr({ qrCode: result.qrCode, qrExpiresAt: result.qrExpiresAt }); toast.success("QR Code pronto para escanear"); } else toast.success("Sessão iniciada. Aguardando o QR Code…"); onRefresh(); void diagnostics.refetch(); }, onError: error => toast.error(error.message) });
   const disconnect = trpc.whatsapp.disconnect.useMutation({ onSuccess: () => { toast.success("Sessão encerrada"); onRefresh(); void diagnostics.refetch(); }, onError: error => toast.error(error.message) });
   const connected = session?.status === "connected";
   const connecting = session?.status === "connecting";
@@ -119,8 +119,11 @@ function WhatsAppView({ workspace, onRefresh }: { workspace: any; onRefresh: () 
     return () => window.clearInterval(timer);
   }, [qrExpiresAt]);
   useEffect(() => {
+    if (diagnostics.data?.session === "connected") setRequestedQr(null);
+  }, [diagnostics.data?.session]);
+  useEffect(() => {
     if (!connecting && !requestedQr) return;
-    const timer = window.setInterval(() => refreshStatus.mutate(), 4000);
+    const timer = window.setInterval(() => { onRefresh(); void diagnostics.refetch(); }, 5000);
     return () => window.clearInterval(timer);
   }, [connecting, requestedQr]);
   const actionBusy = connect.isPending || disconnect.isPending || refreshStatus.isPending;
