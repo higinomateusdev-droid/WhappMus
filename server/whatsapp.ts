@@ -17,7 +17,22 @@ const authSnapshotTimers = new Map<number, NodeJS.Timeout>();
 const authSnapshotInFlight = new Map<number, Promise<void>>();
 const intentionalDisconnects = new Set<number>();
 const authSnapshotDisabled = new Set<number>();
+const outboundQueues = new Map<number, Promise<void>>();
+const lastOutboundAt = new Map<number, number>();
+const dailyOutbound = new Map<number, { day: string; count: number }>();
+const consecutiveSendFailures = new Map<number, number>();
 const logger = pino({ level: process.env.NODE_ENV === "production" ? "warn" : "info" });
+
+const MIN_OUTBOUND_INTERVAL_MS = 5_000;
+const DAILY_OUTBOUND_LIMIT = 100;
+const FAILURE_PAUSE_THRESHOLD = 3;
+
+export function outboundPolicy(to: string, text: string, dailyCount: number) {
+  if (!text.trim()) return "empty_message" as const;
+  if (to.endsWith("@g.us")) return "group_messages_disabled" as const;
+  if (dailyCount >= DAILY_OUTBOUND_LIMIT) return "daily_safety_limit" as const;
+  return "allowed" as const;
+}
 
 export type DirectWhatsAppDiagnostics = {
   provider: "baileys";
@@ -86,6 +101,50 @@ function knowledgeContext(items: Array<{ title: string; question?: string | null
   return text ? `\n\nBASE DE CONHECIMENTO DO NEGÓCIO:\n${text}` : "";
 }
 
+function todayKey() { return new Date().toISOString().slice(0, 10); }
+
+async function safeOutboundSend(userId: number, to: string, text: string) {
+  const initialPolicy = outboundPolicy(to, text, dailyOutbound.get(userId)?.count || 0);
+  if (initialPolicy !== "allowed") return { sent: false as const, reason: initialPolicy };
+  const previous = outboundQueues.get(userId) || Promise.resolve();
+  let result: { sent: boolean; reason?: string } = { sent: false, reason: "not_connected" };
+  const next = previous.then(async () => {
+    const socket = sockets.get(userId);
+    if (!socket?.user) return;
+    const day = todayKey();
+    const usage = dailyOutbound.get(userId);
+    const current = usage?.day === day ? usage : { day, count: 0 };
+    if (current.count >= DAILY_OUTBOUND_LIMIT) {
+      result = { sent: false, reason: "daily_safety_limit" };
+      await addSystemLog(userId, "outbound.rate_limited", `Limite diário atingido (${DAILY_OUTBOUND_LIMIT}).`, "warning");
+      return;
+    }
+    const wait = Math.max(0, MIN_OUTBOUND_INTERVAL_MS - (Date.now() - (lastOutboundAt.get(userId) || 0)));
+    if (wait) await new Promise(resolve => setTimeout(resolve, wait));
+    try {
+      await socket.sendMessage(to.includes("@") ? to : `${to.replace(/\D/g, "")}@s.whatsapp.net`, { text });
+      lastOutboundAt.set(userId, Date.now());
+      dailyOutbound.set(userId, { day, count: current.count + 1 });
+      consecutiveSendFailures.delete(userId);
+      result = { sent: true };
+    } catch (error) {
+      const failures = (consecutiveSendFailures.get(userId) || 0) + 1;
+      consecutiveSendFailures.set(userId, failures);
+      result = { sent: false, reason: "send_failed" };
+      await addSystemLog(userId, "outbound.send_failed", String(error), "warning");
+      if (failures >= FAILURE_PAUSE_THRESHOLD) {
+        const db = await getDb();
+        if (db) await db.update(aiSettings).set({ globalPaused: true }).where(eq(aiSettings.userId, userId));
+        await addSystemLog(userId, "ai.paused_safety", `IA pausada após ${failures} falhas consecutivas.`, "error");
+      }
+    }
+  }).catch(async error => { result = { sent: false, reason: "queue_failed" }; await addSystemLog(userId, "outbound.queue_failed", String(error), "error"); });
+  outboundQueues.set(userId, next);
+  await next;
+  if (outboundQueues.get(userId) === next) outboundQueues.delete(userId);
+  return result;
+}
+
 async function persistSession(userId: number, values: Record<string, unknown>) {
   const db = await getDb();
   if (!db) return;
@@ -127,9 +186,8 @@ async function recordInbound(userId: number, msg: any) {
   try {
     const completion = await invokeLLM({ messages: [{ role: "system", content: `${agent.name} é um agente de WhatsApp Web. Personalidade: ${agent.personality}. Tom: ${agent.tone}. Formalidade: ${agent.formality}. Instruções: ${agent.instructions}. Regras: ${agent.guardrails}. Nunca envie: ${agent.blockedPhrases || "nada especificado"}.${knowledgeContext(knowledge)} Responda apenas com a mensagem final.` }, ...context.reverse().map(item => ({ role: item.direction === "inbound" ? "user" as const : "assistant" as const, content: item.text }))] });
     const responseText = typeof completion.choices[0]?.message.content === "string" ? completion.choices[0].message.content : "Não consegui gerar uma resposta agora.";
-    const socket = sockets.get(userId);
-    const sent = Boolean(socket && socket.user);
-    if (sent) await socket!.sendMessage(waId, { text: responseText });
+    const sentResult = await safeOutboundSend(userId, waId, responseText);
+    const sent = sentResult.sent;
     const inserted = await db.insert(messages).values({ userId, conversationId: conversation.id, direction: "outbound", sender: "ai", text: responseText, aiGenerated: true, status: sent ? "sent" : "failed" });
     await db.insert(aiLogs).values({ userId, conversationId: conversation.id, messageId: Number(inserted[0]?.insertId), model: completion.model, response: responseText, latencyMs: Date.now() - started, status: sent ? "success" : "error" });
     await addSystemLog(userId, sent ? "response.sent" : "ai.response_created", responseText, sent ? "info" : "warning");
@@ -247,10 +305,7 @@ export async function disconnectWhatsApp(userId: number) {
 }
 
 export async function sendWhatsAppMessage(userId: number, to: string, text: string) {
-  const socket = sockets.get(userId);
-  if (!socket?.user) return { sent: false, reason: "not_connected" as const };
-  await socket.sendMessage(to.includes("@") ? to : `${to.replace(/\D/g, "")}@s.whatsapp.net`, { text });
-  return { sent: true as const };
+  return safeOutboundSend(userId, to, text);
 }
 
 export async function getConnectionDiagnostics(userId: number): Promise<DirectWhatsAppDiagnostics> {
