@@ -12,7 +12,9 @@ import { storageGetSignedUrl, storagePut } from "./storage";
 const QR_TTL_MS = 120_000;
 const authRoot = process.env.BAILEYS_AUTH_DIR || ".data/baileys-auth";
 const sockets = new Map<number, WASocket>();
+const startingSockets = new Map<number, Promise<WASocket>>();
 const reconnectTimers = new Map<number, NodeJS.Timeout>();
+const reconnectAttempts = new Map<number, number>();
 const authSnapshotTimers = new Map<number, NodeJS.Timeout>();
 const authSnapshotInFlight = new Map<number, Promise<void>>();
 const intentionalDisconnects = new Set<number>();
@@ -26,6 +28,7 @@ const logger = pino({ level: process.env.NODE_ENV === "production" ? "warn" : "i
 const MIN_OUTBOUND_INTERVAL_MS = 5_000;
 const DAILY_OUTBOUND_LIMIT = 100;
 const FAILURE_PAUSE_THRESHOLD = 3;
+const MAX_AUTOMATIC_RECONNECTS = 6;
 
 export function outboundPolicy(to: string, text: string, dailyCount: number) {
   if (!text.trim()) return "empty_message" as const;
@@ -46,6 +49,10 @@ export type DirectWhatsAppDiagnostics = {
 
 export function shouldRequestNewQr(status: string | undefined, hasSavedCredentials: boolean, hasValidQr: boolean) {
   return !hasSavedCredentials && status !== "connected" && !hasValidQr;
+}
+
+export function shouldAutoReconnect(code: number | undefined, intentional: boolean, attempts: number) {
+  return !intentional && code !== 401 && code !== 440 && attempts < MAX_AUTOMATIC_RECONNECTS;
 }
 
 function authPath(userId: number) { return `${authRoot}/user-${userId}`; }
@@ -198,6 +205,16 @@ async function recordInbound(userId: number, msg: any) {
 }
 
 async function startSocket(userId: number) {
+  const existing = sockets.get(userId);
+  if (existing) return existing;
+  const pending = startingSockets.get(userId);
+  if (pending) return pending;
+  const promise = createSocket(userId);
+  startingSockets.set(userId, promise);
+  try { return await promise; } finally { if (startingSockets.get(userId) === promise) startingSockets.delete(userId); }
+}
+
+async function createSocket(userId: number) {
   if (sockets.has(userId)) return sockets.get(userId)!;
   authSnapshotDisabled.delete(userId);
   await ensureWorkspace(userId);
@@ -216,6 +233,7 @@ async function startSocket(userId: number) {
   sockets.set(userId, socket);
   socket.ev.on("creds.update", async () => { await saveCreds(); scheduleAuthSnapshot(userId); });
   socket.ev.on("connection.update", async ({ connection, lastDisconnect, qr }) => {
+    if (sockets.get(userId) !== socket) return;
     if (qr) {
       const qrCode = await QRCode.toDataURL(qr, { margin: 2, width: 560 });
       const qrExpiresAt = new Date(Date.now() + QR_TTL_MS);
@@ -223,24 +241,32 @@ async function startSocket(userId: number) {
       await addSystemLog(userId, "whatsapp.qr_requested", "QR real recebido diretamente do WhatsApp Web via Baileys.");
     }
     if (connection === "open") {
+      reconnectAttempts.delete(userId);
       const phoneNumber = asPhone(socket.user?.id);
       await persistSession(userId, { status: "connected", phoneNumber, profileName: socket.user?.name || null, connectedAt: new Date(), lastSyncAt: new Date(), qrCode: null, qrExpiresAt: null, errorMessage: null, provider: "baileys" });
       scheduleAuthSnapshot(userId);
       await addSystemLog(userId, "whatsapp.connected", "Sessão WhatsApp Web conectada diretamente via Baileys.");
     }
     if (connection === "close") {
+      if (sockets.get(userId) !== socket) return;
       sockets.delete(userId);
       const intentional = intentionalDisconnects.delete(userId);
       const disconnectError = lastDisconnect?.error as Boom | Error | undefined;
       const code = (disconnectError as Boom)?.output?.statusCode;
       const loggedOut = code === DisconnectReason.loggedOut;
+      const terminalConflict = code === 401 || code === 440;
       const reason = disconnectError instanceof Error ? disconnectError.message : "motivo desconhecido";
       const detail = `Código ${code ?? "n/d"}: ${reason}`;
       if (loggedOut) await rm(authPath(userId), { recursive: true, force: true });
-      await persistSession(userId, { status: loggedOut || intentional ? "disconnected" : "connecting", ...(loggedOut || intentional ? { authStorageKey: null } : {}), qrCode: null, qrExpiresAt: null, errorMessage: loggedOut ? "Sessão encerrada pelo WhatsApp. Será necessário escanear um novo QR." : intentional ? null : `Reconectando automaticamente (${detail}). As credenciais salvas serão reutilizadas.` });
-      await addSystemLog(userId, loggedOut || intentional ? "whatsapp.disconnected" : "whatsapp.reconnecting", detail, loggedOut || intentional ? "warning" : "info");
-      if (!loggedOut && !intentional && !reconnectTimers.has(userId)) {
-        const timer = setTimeout(() => { reconnectTimers.delete(userId); void startSocket(userId); }, 2000);
+      const attempt = reconnectAttempts.get(userId) || 0;
+      const canRetry = !loggedOut && shouldAutoReconnect(code, intentional, attempt);
+      if (canRetry) reconnectAttempts.set(userId, attempt + 1);
+      const conflictMessage = terminalConflict ? `Sessão substituída ou dispositivo removido (${detail}). O retry automático foi bloqueado para evitar oscilação. Feche outros WhatsApp Web e reconecte manualmente.` : null;
+      await persistSession(userId, { status: loggedOut || intentional || !canRetry ? "disconnected" : "connecting", ...(loggedOut || intentional ? { authStorageKey: null } : {}), qrCode: null, qrExpiresAt: null, errorMessage: loggedOut ? "Sessão encerrada pelo WhatsApp. Será necessário escanear um novo QR." : intentional ? null : conflictMessage || (!canRetry ? `Reconexão automática pausada após ${MAX_AUTOMATIC_RECONNECTS} tentativas (${detail}). Verifique se existe outro WhatsApp Web ativo e reconecte manualmente.` : `Reconectando com backoff (${detail}). As credenciais salvas serão reutilizadas.`) });
+      await addSystemLog(userId, loggedOut || intentional || !canRetry ? "whatsapp.disconnected" : "whatsapp.reconnecting", detail, loggedOut || intentional || !canRetry ? "warning" : "info");
+      if (canRetry && !reconnectTimers.has(userId)) {
+        const delay = Math.min(60_000, 2_000 * (2 ** attempt));
+        const timer = setTimeout(() => { reconnectTimers.delete(userId); void startSocket(userId); }, delay);
         reconnectTimers.set(userId, timer);
       }
     }
