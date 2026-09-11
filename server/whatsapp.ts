@@ -3,13 +3,20 @@ import makeWASocket, { Browsers, DisconnectReason, fetchLatestBaileysVersion, us
 import { Boom } from "@hapi/boom";
 import QRCode from "qrcode";
 import pino from "pino";
+import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import path from "node:path";
 import { invokeLLM } from "./_core/llm";
 import { addSystemLog, aiAgents, aiLogs, aiSettings, contacts, conversations, ensureWorkspace, getDb, knowledgeItems, messages, whatsappSessions } from "./db";
+import { storageGetSignedUrl, storagePut } from "./storage";
 
 const QR_TTL_MS = 120_000;
 const authRoot = process.env.BAILEYS_AUTH_DIR || ".data/baileys-auth";
 const sockets = new Map<number, WASocket>();
 const reconnectTimers = new Map<number, NodeJS.Timeout>();
+const authSnapshotTimers = new Map<number, NodeJS.Timeout>();
+const authSnapshotInFlight = new Map<number, Promise<void>>();
+const intentionalDisconnects = new Set<number>();
+const authSnapshotDisabled = new Set<number>();
 const logger = pino({ level: process.env.NODE_ENV === "production" ? "warn" : "info" });
 
 export type DirectWhatsAppDiagnostics = {
@@ -22,7 +29,56 @@ export type DirectWhatsAppDiagnostics = {
   ai: boolean;
 };
 
+export function shouldRequestNewQr(status: string | undefined, hasSavedCredentials: boolean, hasValidQr: boolean) {
+  return !hasSavedCredentials && status !== "connected" && !hasValidQr;
+}
+
 function authPath(userId: number) { return `${authRoot}/user-${userId}`; }
+function authSnapshotPath(userId: number) { return `${userId}-whatsapp-auth/session.json`; }
+
+async function hasLocalAuth(userId: number) {
+  try { await stat(path.join(authPath(userId), "creds.json")); return true; } catch { return false; }
+}
+
+async function restoreAuthSnapshot(userId: number, storageKey?: string | null) {
+  if (!storageKey || await hasLocalAuth(userId)) return;
+  const signedUrl = await storageGetSignedUrl(storageKey);
+  const response = await fetch(signedUrl);
+  if (!response.ok) throw new Error(`Falha ao restaurar credenciais persistidas (${response.status}).`);
+  const snapshot = await response.json() as { files?: Record<string, string> };
+  if (!snapshot.files || typeof snapshot.files !== "object") throw new Error("Snapshot de autenticação inválido.");
+  const directory = authPath(userId);
+  await mkdir(directory, { recursive: true });
+  await Promise.all(Object.entries(snapshot.files).map(([name, value]) => writeFile(path.join(directory, name), Buffer.from(value, "base64"))));
+  await addSystemLog(userId, "whatsapp.auth_restored", "Credenciais Baileys restauradas do storage persistente.");
+}
+
+async function saveAuthSnapshot(userId: number) {
+  if (authSnapshotDisabled.has(userId)) return;
+  if (authSnapshotInFlight.has(userId)) return authSnapshotInFlight.get(userId);
+  const task = (async () => {
+    const directory = authPath(userId);
+    const names = await readdir(directory).catch(() => [] as string[]);
+    const files: Record<string, string> = {};
+    for (const name of names) {
+      const filePath = path.join(directory, name);
+      if ((await stat(filePath)).isFile()) files[name] = (await readFile(filePath)).toString("base64");
+    }
+    if (!files["creds.json"]) return;
+    if (authSnapshotDisabled.has(userId)) return;
+    const stored = await storagePut(authSnapshotPath(userId), JSON.stringify({ version: 1, savedAt: new Date().toISOString(), files }), "application/json");
+    if (!authSnapshotDisabled.has(userId)) await persistSession(userId, { authStorageKey: stored.key });
+  })().catch(async error => { await addSystemLog(userId, "whatsapp.auth_snapshot_failed", String(error), "warning"); });
+  authSnapshotInFlight.set(userId, task);
+  await task.finally(() => authSnapshotInFlight.delete(userId));
+}
+
+function scheduleAuthSnapshot(userId: number) {
+  const existing = authSnapshotTimers.get(userId);
+  if (existing) clearTimeout(existing);
+  const timer = setTimeout(() => { authSnapshotTimers.delete(userId); void saveAuthSnapshot(userId); }, 3_000);
+  authSnapshotTimers.set(userId, timer);
+}
 function asPhone(jid?: string | null) { return jid ? jid.split("@")[0].split(":")[0] : null; }
 function messageText(message: any) { return message?.conversation || message?.extendedTextMessage?.text || message?.imageMessage?.caption || message?.videoMessage?.caption || ""; }
 function knowledgeContext(items: Array<{ title: string; question?: string | null; content: string }>) {
@@ -85,7 +141,11 @@ async function recordInbound(userId: number, msg: any) {
 
 async function startSocket(userId: number) {
   if (sockets.has(userId)) return sockets.get(userId)!;
+  authSnapshotDisabled.delete(userId);
   await ensureWorkspace(userId);
+  const db = await getDb();
+  const [session] = db ? await db.select().from(whatsappSessions).where(eq(whatsappSessions.userId, userId)).limit(1) : [];
+  await restoreAuthSnapshot(userId, session?.authStorageKey);
   const { state, saveCreds } = await useMultiFileAuthState(authPath(userId));
   let version: [number, number, number] | undefined;
   try {
@@ -96,7 +156,7 @@ async function startSocket(userId: number) {
   }
   const socket = makeWASocket({ auth: state, ...(version ? { version } : {}), browser: Browsers.ubuntu("Turnstark Lab"), logger, markOnlineOnConnect: false, printQRInTerminal: false, connectTimeoutMs: 60_000, keepAliveIntervalMs: 25_000 });
   sockets.set(userId, socket);
-  socket.ev.on("creds.update", saveCreds);
+  socket.ev.on("creds.update", async () => { await saveCreds(); scheduleAuthSnapshot(userId); });
   socket.ev.on("connection.update", async ({ connection, lastDisconnect, qr }) => {
     if (qr) {
       const qrCode = await QRCode.toDataURL(qr, { margin: 2, width: 560 });
@@ -107,18 +167,21 @@ async function startSocket(userId: number) {
     if (connection === "open") {
       const phoneNumber = asPhone(socket.user?.id);
       await persistSession(userId, { status: "connected", phoneNumber, profileName: socket.user?.name || null, connectedAt: new Date(), lastSyncAt: new Date(), qrCode: null, qrExpiresAt: null, errorMessage: null, provider: "baileys" });
+      scheduleAuthSnapshot(userId);
       await addSystemLog(userId, "whatsapp.connected", "Sessão WhatsApp Web conectada diretamente via Baileys.");
     }
     if (connection === "close") {
       sockets.delete(userId);
+      const intentional = intentionalDisconnects.delete(userId);
       const disconnectError = lastDisconnect?.error as Boom | Error | undefined;
       const code = (disconnectError as Boom)?.output?.statusCode;
       const loggedOut = code === DisconnectReason.loggedOut;
       const reason = disconnectError instanceof Error ? disconnectError.message : "motivo desconhecido";
       const detail = `Código ${code ?? "n/d"}: ${reason}`;
-      await persistSession(userId, { status: loggedOut ? "disconnected" : "error", qrCode: null, qrExpiresAt: null, errorMessage: loggedOut ? "Sessão encerrada pelo WhatsApp." : `Conexão encerrada (${detail}). Clique em Gerar novo QR.` });
-      await addSystemLog(userId, loggedOut ? "whatsapp.disconnected" : "whatsapp.reconnecting", detail, loggedOut ? "warning" : "error");
-      if (!loggedOut && !reconnectTimers.has(userId)) {
+      if (loggedOut) await rm(authPath(userId), { recursive: true, force: true });
+      await persistSession(userId, { status: loggedOut || intentional ? "disconnected" : "connecting", ...(loggedOut || intentional ? { authStorageKey: null } : {}), qrCode: null, qrExpiresAt: null, errorMessage: loggedOut ? "Sessão encerrada pelo WhatsApp. Será necessário escanear um novo QR." : intentional ? null : `Reconectando automaticamente (${detail}). As credenciais salvas serão reutilizadas.` });
+      await addSystemLog(userId, loggedOut || intentional ? "whatsapp.disconnected" : "whatsapp.reconnecting", detail, loggedOut || intentional ? "warning" : "info");
+      if (!loggedOut && !intentional && !reconnectTimers.has(userId)) {
         const timer = setTimeout(() => { reconnectTimers.delete(userId); void startSocket(userId); }, 2000);
         reconnectTimers.set(userId, timer);
       }
@@ -136,7 +199,8 @@ export async function connectWhatsApp(userId: number) {
     const db = await getDb();
     const [session] = db ? await db.select().from(whatsappSessions).where(eq(whatsappSessions.userId, userId)).limit(1) : [];
     const hasValidQr = Boolean(session?.qrCode && session.qrExpiresAt && session.qrExpiresAt.getTime() > Date.now());
-    const shouldRenewQr = Boolean(session?.status !== "connected" && !hasValidQr);
+    const hasSavedCredentials = Boolean(session?.authStorageKey) || await hasLocalAuth(userId);
+    const shouldRenewQr = shouldRequestNewQr(session?.status, hasSavedCredentials, hasValidQr);
     if (shouldRenewQr) {
       const existing = sockets.get(userId);
       if (existing) {
@@ -167,9 +231,17 @@ export async function refreshWhatsAppStatus(userId: number) {
 }
 
 export async function disconnectWhatsApp(userId: number) {
+  authSnapshotDisabled.add(userId);
+  const snapshotTimer = authSnapshotTimers.get(userId);
+  if (snapshotTimer) { clearTimeout(snapshotTimer); authSnapshotTimers.delete(userId); }
+  intentionalDisconnects.add(userId);
+  const timer = reconnectTimers.get(userId);
+  if (timer) { clearTimeout(timer); reconnectTimers.delete(userId); }
   const socket = sockets.get(userId);
+  if (!socket) intentionalDisconnects.delete(userId);
   if (socket) { try { await socket.logout(); } catch { socket.end(undefined); } sockets.delete(userId); }
-  await persistSession(userId, { status: "disconnected", qrCode: null, qrExpiresAt: null, phoneNumber: null, profileName: null, connectedAt: null, errorMessage: null, provider: "baileys" });
+  await rm(authPath(userId), { recursive: true, force: true });
+  await persistSession(userId, { status: "disconnected", qrCode: null, qrExpiresAt: null, phoneNumber: null, profileName: null, connectedAt: null, authStorageKey: null, errorMessage: null, provider: "baileys" });
   await addSystemLog(userId, "whatsapp.disconnected", "Sessão WhatsApp Web encerrada pelo painel.");
   return { success: true };
 }
@@ -191,8 +263,11 @@ export async function getConnectionDiagnostics(userId: number): Promise<DirectWh
 export async function resumeWhatsAppSessions() {
   const db = await getDb();
   if (!db) return;
-  const sessions = await db.select().from(whatsappSessions).where(inArray(whatsappSessions.status, ["connected", "connecting"]));
-  for (const session of sessions) void startSocket(session.userId);
+  const sessions = await db.select().from(whatsappSessions);
+  for (const session of sessions) {
+    const resumable = session.status === "connected" || session.status === "connecting" || (session.status === "error" && Boolean(session.authStorageKey));
+    if (resumable) void startSocket(session.userId);
+  }
 }
 
 export const isWhatsAppConfigured = () => true;

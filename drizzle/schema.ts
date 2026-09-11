@@ -29,6 +29,7 @@ export const whatsappSessions = mysqlTable("whatsapp_sessions", {
   status: mysqlEnum("status", ["disconnected", "connecting", "connected", "error"]).default("disconnected").notNull(),
   phoneNumber: varchar("phoneNumber", { length: 64 }),
   profileName: varchar("profileName", { length: 180 }),
+  authStorageKey: varchar("authStorageKey", { length: 700 }),
   qrCode: text("qrCode"),
   qrExpiresAt: timestamp("qrExpiresAt"),
   errorMessage: text("errorMessage"),
