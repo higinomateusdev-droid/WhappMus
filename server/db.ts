@@ -1,131 +1,214 @@
-import { and, desc, eq, inArray } from "drizzle-orm";
-import { drizzle } from "drizzle-orm/mysql2";
-import {
-  aiAgents,
-  aiLogs,
-  aiSettings,
-  contacts,
-  conversations,
-  knowledgeItems,
-  InsertUser,
-  messages,
-  systemLogs,
-  users,
-  whatsappSessions,
-} from "../drizzle/schema";
-import { ENV } from "./_core/env";
+import { getOrganizationForUser, getSupabaseAdmin, requireOrganizationForUser, supabaseErrorMessage } from "./supabase";
 
-let _db: ReturnType<typeof drizzle> | null = null;
+// Legacy Manus OAuth modules remain in the repository for rollback compatibility,
+// but the active request context no longer calls them. These no-op shims prevent
+// an unused legacy import from becoming an authentication path again.
+export async function upsertUser(_user: { openId: string; [key: string]: unknown }): Promise<void> {}
+export async function getUserByOpenId(_openId: string): Promise<any> { return undefined; }
 
-export async function getDb() {
-  if (!_db && process.env.DATABASE_URL) {
-    try { _db = drizzle(process.env.DATABASE_URL); } catch (error) { console.warn("[Database] Failed to connect:", error); _db = null; }
-  }
-  return _db;
+export type WorkspaceSession = {
+  id: string;
+  organizationId: string;
+  provider: string;
+  instanceName: string;
+  status: "disconnected" | "connecting" | "connected" | "error";
+  phoneNumber: string | null;
+  profileName: string | null;
+  authStorageKey: string | null;
+  qrCode: string | null;
+  qrExpiresAt: Date | null;
+  errorMessage: string | null;
+  lastSyncAt: Date | null;
+  connectedAt: Date | null;
+};
+
+export type WorkspaceAgent = {
+  id: string;
+  organizationId: string;
+  name: string;
+  personality: string;
+  tone: string;
+  formality: string;
+  instructions: string;
+  guardrails: string;
+  blockedPhrases: string;
+  model: string;
+  enabled: boolean;
+};
+
+function date(value: string | null | undefined) { return value ? new Date(value) : null; }
+
+function mapSession(row: any): WorkspaceSession {
+  return {
+    id: row.id,
+    organizationId: row.organization_id,
+    provider: row.provider,
+    instanceName: row.instance_name,
+    status: row.status,
+    phoneNumber: row.phone_number ?? null,
+    profileName: row.profile_name ?? null,
+    authStorageKey: row.auth_storage_key ?? null,
+    qrCode: row.qr_code ?? null,
+    qrExpiresAt: date(row.qr_expires_at),
+    errorMessage: row.error_message ?? null,
+    lastSyncAt: date(row.last_sync_at),
+    connectedAt: date(row.connected_at),
+  };
 }
 
-export async function upsertUser(user: InsertUser): Promise<void> {
-  if (!user.openId) throw new Error("User openId is required for upsert");
-  const db = await getDb();
-  if (!db) return;
-  const values: InsertUser = { openId: user.openId };
-  const updateSet: Record<string, unknown> = {};
-  for (const field of ["name", "email", "loginMethod"] as const) {
-    if (user[field] !== undefined) { values[field] = user[field] ?? null; updateSet[field] = user[field] ?? null; }
-  }
-  values.lastSignedIn = user.lastSignedIn ?? new Date();
-  updateSet.lastSignedIn = values.lastSignedIn;
-  if (user.role !== undefined) { values.role = user.role; updateSet.role = user.role; }
-  else if (user.openId === ENV.ownerOpenId) { values.role = "admin"; updateSet.role = "admin"; }
-  await db.insert(users).values(values).onDuplicateKeyUpdate({ set: updateSet });
+function mapAgent(row: any): WorkspaceAgent {
+  return {
+    id: row.id,
+    organizationId: row.organization_id,
+    name: row.name,
+    personality: row.personality,
+    tone: row.tone,
+    formality: row.formality,
+    instructions: row.instructions,
+    guardrails: row.guardrails,
+    blockedPhrases: row.blocked_phrases,
+    model: row.model,
+    enabled: row.enabled,
+  };
 }
 
-export async function getUserByOpenId(openId: string) {
-  const db = await getDb();
-  if (!db) return undefined;
-  const result = await db.select().from(users).where(eq(users.openId, openId)).limit(1);
-  return result[0];
+function mapSettings(row: any) {
+  return row ? {
+    id: row.id,
+    organizationId: row.organization_id,
+    autoReplyEnabled: row.auto_reply_enabled,
+    globalPaused: row.global_paused,
+    dailyOutboundLimit: row.daily_outbound_limit,
+    minOutboundIntervalSeconds: row.min_outbound_interval_seconds,
+    requireContactOptIn: row.require_contact_opt_in,
+  } : null;
 }
 
-export async function ensureWorkspace(userId: number) {
-  const db = await getDb();
-  if (!db) return null;
-  const [agent] = await db.select().from(aiAgents).where(eq(aiAgents.userId, userId)).limit(1);
+export async function getDb() { return getSupabaseAdmin(); }
+
+export async function ensureWorkspace(userId: string) {
+  const scope = await getOrganizationForUser(userId);
+  if (!scope) return null;
+  const supabase = getSupabaseAdmin();
+  const organizationId = scope.organizationId;
+
+  const { data: agent } = await supabase.from("ai_agents").select("*").eq("organization_id", organizationId).limit(1).maybeSingle();
   if (!agent) {
-    await db.insert(aiAgents).values({
-      userId,
-      name: "Nova",
-      personality: "Amigável, natural, prestativa e conversacional.",
-      tone: "Calmo e acolhedor",
-      formality: "Equilibrada",
-      instructions: "Responda com clareza, mantenha o contexto e peça esclarecimentos quando necessário.",
-      guardrails: "Nunca invente informações. Encaminhe para atendimento humano quando necessário.",
-      blockedPhrases: "",
-      model: "platform-default",
-      enabled: true,
+    const { error } = await supabase.from("ai_agents").insert({ organization_id: organizationId });
+    if (error) throw error;
+  }
+  const { data: settings } = await supabase.from("ai_settings").select("*").eq("organization_id", organizationId).limit(1).maybeSingle();
+  if (!settings) {
+    const { error } = await supabase.from("ai_settings").insert({ organization_id: organizationId });
+    if (error) throw error;
+  }
+  const { data: session } = await supabase.from("whatsapp_connections").select("*").eq("organization_id", organizationId).limit(1).maybeSingle();
+  if (!session) {
+    const { error } = await supabase.from("whatsapp_connections").insert({ organization_id: organizationId, instance_name: `turnstark-${organizationId.slice(0, 8)}`, provider: "baileys" });
+    if (error) throw error;
+  }
+  return { organizationId, role: scope.role };
+}
+
+export async function getWorkspace(userId: string) {
+  const scope = await getOrganizationForUser(userId);
+  if (!scope) return null;
+  await ensureWorkspace(userId);
+  const supabase = getSupabaseAdmin();
+  const [{ data: session }, { data: agent }, { data: settings }] = await Promise.all([
+    supabase.from("whatsapp_connections").select("*").eq("organization_id", scope.organizationId).limit(1).maybeSingle(),
+    supabase.from("ai_agents").select("*").eq("organization_id", scope.organizationId).limit(1).maybeSingle(),
+    supabase.from("ai_settings").select("*").eq("organization_id", scope.organizationId).limit(1).maybeSingle(),
+  ]);
+  return {
+    organization: scope.organization,
+    organizationId: scope.organizationId,
+    role: scope.role,
+    session: session ? mapSession(session) : null,
+    agent: agent ? mapAgent(agent) : null,
+    settings: mapSettings(settings),
+  };
+}
+
+export async function getConversations(userId: string) {
+  const { organizationId } = await requireOrganizationForUser(userId);
+  const supabase = getSupabaseAdmin();
+  const { data: rows, error } = await supabase.from("conversations").select("*").eq("organization_id", organizationId).order("last_message_at", { ascending: false, nullsFirst: false }).order("updated_at", { ascending: false });
+  if (error) throw error;
+  const contactIds = (rows ?? []).map(row => row.contact_id);
+  const { data: contacts } = contactIds.length ? await supabase.from("contacts").select("*").eq("organization_id", organizationId).in("id", contactIds) : { data: [] };
+  const result = [];
+  for (const row of rows ?? []) {
+    const { data: lastMessage } = await supabase.from("messages").select("*").eq("organization_id", organizationId).eq("conversation_id", row.id).order("created_at", { ascending: false }).limit(1).maybeSingle();
+    result.push({
+      id: row.id,
+      organizationId: row.organization_id,
+      contactId: row.contact_id,
+      status: row.status,
+      unreadCount: row.unread_count,
+      lastMessageAt: date(row.last_message_at),
+      updatedAt: date(row.updated_at),
+      contact: (contacts ?? []).find(contact => contact.id === row.contact_id) ?? null,
+      lastMessage: lastMessage ? { ...lastMessage, text: lastMessage.content, createdAt: date(lastMessage.created_at) } : null,
     });
   }
-  const [settings] = await db.select().from(aiSettings).where(eq(aiSettings.userId, userId)).limit(1);
-  if (!settings) await db.insert(aiSettings).values({ userId });
-  const [session] = await db.select().from(whatsappSessions).where(eq(whatsappSessions.userId, userId)).limit(1);
-  if (!session) await db.insert(whatsappSessions).values({ userId, instanceName: `turnstark-${userId}`, provider: "baileys" });
-  else if (session.provider !== "baileys") await db.update(whatsappSessions).set({ provider: "baileys" }).where(eq(whatsappSessions.id, session.id));
-  return true;
+  return result;
 }
 
-export async function getWorkspace(userId: number) {
-  const db = await getDb();
-  if (!db) return null;
-  await ensureWorkspace(userId);
-  const [session] = await db.select().from(whatsappSessions).where(eq(whatsappSessions.userId, userId)).limit(1);
-  const [agent] = await db.select().from(aiAgents).where(eq(aiAgents.userId, userId)).limit(1);
-  const [settings] = await db.select().from(aiSettings).where(eq(aiSettings.userId, userId)).limit(1);
-  return { session, agent, settings };
+export async function getConversationMessages(userId: string, conversationId: string) {
+  const { organizationId } = await requireOrganizationForUser(userId);
+  const { data: rows, error } = await getSupabaseAdmin().from("messages").select("*").eq("organization_id", organizationId).eq("conversation_id", conversationId).order("created_at");
+  if (error) throw error;
+  return (rows ?? []).map(row => ({ ...row, text: row.content, createdAt: date(row.created_at), externalId: row.external_id, aiGenerated: row.ai_generated }));
 }
 
-export async function getConversations(userId: number) {
-  const db = await getDb();
-  if (!db) return [];
-  const rows = await db.select().from(conversations).where(eq(conversations.userId, userId)).orderBy(desc(conversations.lastMessageAt), desc(conversations.updatedAt));
-  if (!rows.length) return [];
-  const contactIds = rows.map(row => row.contactId);
-  const people = await db.select().from(contacts).where(and(eq(contacts.userId, userId), inArray(contacts.id, contactIds)));
-  return Promise.all(rows.map(async row => {
-    const [message] = await db.select().from(messages).where(and(eq(messages.userId, userId), eq(messages.conversationId, row.id))).orderBy(desc(messages.createdAt)).limit(1);
-    return { ...row, contact: people.find(person => person.id === row.contactId) ?? null, lastMessage: message ?? null };
-  }));
+export async function getRecentLogs(userId: string) {
+  const { organizationId } = await requireOrganizationForUser(userId);
+  const { data, error } = await getSupabaseAdmin().from("system_logs").select("*").eq("organization_id", organizationId).order("created_at", { ascending: false }).limit(40);
+  if (error) throw error;
+  return data ?? [];
 }
 
-export async function getConversationMessages(userId: number, conversationId: number) {
-  const db = await getDb();
-  if (!db) return [];
-  return db.select().from(messages).where(and(eq(messages.userId, userId), eq(messages.conversationId, conversationId))).orderBy(messages.createdAt);
+export async function getKnowledgeItems(userId: string) {
+  const { organizationId } = await requireOrganizationForUser(userId);
+  const { data, error } = await getSupabaseAdmin().from("knowledge_items").select("*").eq("organization_id", organizationId).order("updated_at", { ascending: false });
+  if (error) throw error;
+  return (data ?? []).map(item => ({ ...item, organizationId: item.organization_id, storageKey: item.storage_path, storageUrl: item.storage_path, mimeType: item.mime_type, fileName: item.file_name, fileSize: item.file_size }));
 }
 
-export async function getRecentLogs(userId: number) {
-  const db = await getDb();
-  if (!db) return [];
-  return db.select().from(systemLogs).where(eq(systemLogs.userId, userId)).orderBy(desc(systemLogs.createdAt)).limit(40);
+export async function addSystemLog(userId: string, event: string, detail?: string, level: "info" | "warning" | "error" = "info") {
+  const { organizationId } = await requireOrganizationForUser(userId);
+  const { error } = await getSupabaseAdmin().from("system_logs").insert({ organization_id: organizationId, event, detail: detail ?? null, level });
+  if (error) throw error;
 }
 
-export async function getKnowledgeItems(userId: number) {
-  const db = await getDb();
-  if (!db) return [];
-  return db.select().from(knowledgeItems).where(eq(knowledgeItems.userId, userId)).orderBy(desc(knowledgeItems.updatedAt));
+export async function getCounts(userId: string) {
+  const { organizationId } = await requireOrganizationForUser(userId);
+  const supabase = getSupabaseAdmin();
+  const [{ data: allMessages }, { data: active }] = await Promise.all([
+    supabase.from("messages").select("direction, ai_generated").eq("organization_id", organizationId),
+    supabase.from("conversations").select("id").eq("organization_id", organizationId).eq("status", "active"),
+  ]);
+  return {
+    received: (allMessages ?? []).filter(message => message.direction === "inbound").length,
+    aiReplies: (allMessages ?? []).filter(message => message.ai_generated).length,
+    activeConversations: (active ?? []).length,
+  };
 }
 
-export async function addSystemLog(userId: number, event: string, detail?: string, level: "info" | "warning" | "error" = "info") {
-  const db = await getDb();
-  if (!db) return;
-  await db.insert(systemLogs).values({ userId, event, detail, level });
+export async function updateConnection(userId: string, values: Record<string, unknown>) {
+  const { organizationId } = await requireOrganizationForUser(userId);
+  const { data, error } = await getSupabaseAdmin().from("whatsapp_connections").update(values).eq("organization_id", organizationId).select("*").single();
+  if (error) throw new Error(supabaseErrorMessage(error));
+  return mapSession(data);
 }
 
-export async function getCounts(userId: number) {
-  const db = await getDb();
-  if (!db) return { received: 0, aiReplies: 0, activeConversations: 0 };
-  const allMessages = await db.select().from(messages).where(eq(messages.userId, userId));
-  const active = await db.select().from(conversations).where(and(eq(conversations.userId, userId), eq(conversations.status, "active")));
-  return { received: allMessages.filter(message => message.direction === "inbound").length, aiReplies: allMessages.filter(message => message.aiGenerated).length, activeConversations: active.length };
+export async function getConnection(userId: string) {
+  const { organizationId } = await requireOrganizationForUser(userId);
+  const { data, error } = await getSupabaseAdmin().from("whatsapp_connections").select("*").eq("organization_id", organizationId).limit(1).maybeSingle();
+  if (error) throw error;
+  return data ? mapSession(data) : null;
 }
 
-export { aiAgents, aiLogs, aiSettings, contacts, conversations, knowledgeItems, messages, systemLogs, users, whatsappSessions };
+export { mapSession, mapAgent, mapSettings };
+export { requireOrganizationForUser };

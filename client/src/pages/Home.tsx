@@ -1,5 +1,6 @@
 import { useAuth } from "@/_core/hooks/useAuth";
-import { startLogin } from "@/const";
+import { Link } from "wouter";
+import Onboarding from "@/pages/Onboarding";
 import { trpc } from "@/lib/trpc";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -77,11 +78,15 @@ function AccessGate() {
           <div><p className="text-[10px] font-bold tracking-[0.28em] text-cyan-300">PRIVATE AI LAB</p><h1 className="text-xl font-semibold tracking-tight">TURNSTARK LAB</h1></div>
         </div>
         <div className="mb-8 space-y-3"><div className="flex items-center gap-2 text-cyan-300"><LockKeyhole className="h-4 w-4" /><span className="text-xs font-semibold uppercase tracking-[0.2em]">Acesso restrito</span></div><h2 className="text-3xl font-semibold leading-tight">Seu laboratório privado para automações conversacionais.</h2><p className="text-sm leading-6 text-slate-400">Entre para conectar uma sessão, controlar a IA e acompanhar as mensagens com segurança.</p></div>
-        <Button onClick={() => startLogin()} className="h-12 w-full rounded-xl bg-cyan-400 font-semibold text-[#071116] hover:bg-cyan-300">Entrar no laboratório <ChevronRight className="ml-2 h-4 w-4" /></Button>
+        <Link href="/auth" className="flex h-12 w-full items-center justify-center rounded-xl bg-cyan-400 font-semibold text-[#071116] transition hover:bg-cyan-300">Entrar no laboratório <ChevronRight className="ml-2 h-4 w-4" /></Link>
         <p className="mt-5 text-center text-[11px] text-slate-500">Autenticação protegida · dados isolados por usuário</p>
       </div>
     </main>
   );
+}
+
+function OrganizationGate() {
+  return <Onboarding onComplete={() => window.location.reload()} />;
 }
 
 function StatusPill({ connected, label }: { connected: boolean; label: string }) {
@@ -202,13 +207,14 @@ export default function Home() {
   const [activeConversation, setActiveConversation] = useState<any>(null);
   const workspaceQuery = trpc.workspace.overview.useQuery(undefined, { enabled: Boolean(user), refetchInterval: 10000 });
   const conversationsQuery = trpc.conversations.list.useQuery(undefined, { enabled: Boolean(user), refetchInterval: 7000 });
-  const messagesQuery = trpc.conversations.messages.useQuery({ conversationId: activeConversation?.id ?? 0 }, { enabled: Boolean(user && activeConversation?.id), refetchInterval: 5000 });
+  const messagesQuery = trpc.conversations.messages.useQuery({ conversationId: activeConversation?.id ?? "00000000-0000-0000-0000-000000000000" }, { enabled: Boolean(user && activeConversation?.id), refetchInterval: 5000 });
   const pause = trpc.workspace.pauseAi.useMutation({ onSuccess: () => workspaceQuery.refetch(), onError: error => toast.error(error.message) });
   const conversations = conversationsQuery.data ?? [];
   useEffect(() => { if (!activeConversation && conversations[0]) setActiveConversation(conversations[0]); if (activeConversation) { const latest = conversations.find(item => item.id === activeConversation.id); if (latest) setActiveConversation(latest); } }, [conversations, activeConversation]);
   if (loading) return <div className="min-h-screen bg-[#080b10] grid place-items-center text-cyan-300"><Loader2 className="h-6 w-6 animate-spin" /></div>;
   if (!user) return <AccessGate />;
   const workspace = workspaceQuery.data;
+  if (workspace && !workspace.workspaceReady) return <OrganizationGate />;
   const aiPaused = Boolean(workspace?.settings?.globalPaused || !workspace?.agent?.enabled || !workspace?.settings?.autoReplyEnabled);
   const refreshAll = () => { void workspaceQuery.refetch(); void conversationsQuery.refetch(); void messagesQuery.refetch(); };
   const content = activeSection === "dashboard" ? <DashboardView workspace={workspace} onNavigate={setActiveSection} /> : activeSection === "whatsapp" ? <WhatsAppView workspace={workspace} onRefresh={refreshAll} /> : activeSection === "conversations" ? <ConversationsView conversations={conversations} activeConversation={activeConversation} setActiveConversation={setActiveConversation} messages={messagesQuery.data ?? []} onRefresh={refreshAll} /> : activeSection === "ai" ? <AiView workspace={workspace} onRefresh={refreshAll} /> : activeSection === "test" ? <TestView workspace={workspace} /> : <LogsView logs={workspace?.logs ?? []} />;
