@@ -2,6 +2,7 @@ import { createClient, type SupabaseClient, type User as SupabaseUser } from "@s
 
 const url = process.env.SUPABASE_URL ?? "";
 const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY ?? "";
+const anonKey = process.env.SUPABASE_ANON_KEY ?? process.env.VITE_SUPABASE_ANON_KEY ?? "";
 
 let adminClient: SupabaseClient | null = null;
 
@@ -13,6 +14,21 @@ export function getSupabaseAdmin() {
     });
   }
   return adminClient;
+}
+
+export function extractBearerToken(authorization: string | string[] | undefined) {
+  const value = Array.isArray(authorization) ? authorization[0] : authorization;
+  if (!value?.startsWith("Bearer ")) return null;
+  return value.slice("Bearer ".length).trim() || null;
+}
+
+/** Creates a request-scoped client that preserves auth.uid() in SQL RPCs. */
+export function getSupabaseUserClient(accessToken: string) {
+  if (!url || !anonKey) throw new Error("Supabase anon key is not configured on the server.");
+  return createClient(url, anonKey, {
+    auth: { autoRefreshToken: false, persistSession: false },
+    global: { headers: { Authorization: `Bearer ${accessToken}` } },
+  });
 }
 
 export type AuthenticatedSupabaseUser = SupabaseUser;

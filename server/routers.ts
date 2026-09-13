@@ -4,7 +4,7 @@ import { invokeLLM } from "./_core/llm";
 import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
 import { addSystemLog, ensureWorkspace, getConnection, getConversationMessages, getConversations, getCounts, getDb, getKnowledgeItems, getRecentLogs, getWorkspace, requireOrganizationForUser, updateConnection } from "./db";
 import { connectWhatsApp, disconnectWhatsApp, getConnectionDiagnostics, getMissingWhatsAppConfig, isWhatsAppConfigured, refreshWhatsAppStatus, sendWhatsAppMessage } from "./whatsapp";
-import { getOrganizationForUser, getSupabaseAdmin } from "./supabase";
+import { extractBearerToken, getOrganizationForUser, getSupabaseAdmin, getSupabaseUserClient } from "./supabase";
 import { knowledgeStoragePut } from "./storage";
 import { COOKIE_NAME } from "@shared/const";
 
@@ -50,7 +50,10 @@ export const appRouter = router({
       const db = getSupabaseAdmin();
       const { data: existing } = await db.from("memberships").select("organization_id").eq("user_id", ctx.user.id).limit(1).maybeSingle();
       if (existing) throw new Error("Este utilizador já possui uma organização.");
-      const { data, error } = await db.rpc("create_organization", { v_name: input.name, v_slug: input.slug });
+      const accessToken = extractBearerToken(ctx.req.headers.authorization);
+      if (!accessToken) throw new Error("Sessão Supabase ausente. Atualize a página e tente novamente.");
+      // This RPC uses auth.uid(), so it must run with the user's JWT rather than the service-role client.
+      const { data, error } = await getSupabaseUserClient(accessToken).rpc("create_organization", { v_name: input.name, v_slug: input.slug });
       if (error) throw error;
       return data;
     }),

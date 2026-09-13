@@ -1,4 +1,14 @@
 import { describe, expect, it } from "vitest";
+import { extractBearerToken } from "./supabase";
+
+describe("Supabase bearer authentication", () => {
+  it("extracts only a valid bearer token and handles array headers", () => {
+    expect(extractBearerToken("Bearer user-access-token")).toBe("user-access-token");
+    expect(extractBearerToken(["Bearer array-token"])).toBe("array-token");
+    expect(extractBearerToken("Basic credentials")).toBeNull();
+    expect(extractBearerToken(undefined)).toBeNull();
+  });
+});
 
 describe("Supabase external project credentials", () => {
   it("accepts the configured server-only service role key", async () => {
