@@ -1,9 +1,9 @@
 import { defineConfig } from "drizzle-kit";
 
-const connectionString = process.env.DATABASE_URL;
-if (!connectionString) {
-  throw new Error("DATABASE_URL is required to run drizzle commands");
-}
+// DATABASE_URL is only needed for commands that open a connection (migrate/push).
+// `generate` just diffs the schema file against migration history, so don't
+// require it here or the automatic `drizzle-kit generate` build step fails.
+const connectionString = process.env.DATABASE_URL ?? "";
 
 export default defineConfig({
   schema: "./drizzle/schema.ts",
