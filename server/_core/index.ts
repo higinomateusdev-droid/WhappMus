@@ -28,19 +28,37 @@ async function findAvailablePort(startPort = 3000): Promise<number> {
 async function startServer() {
   const app = express();
   const server = createServer(app);
+  const allowedOrigins = new Set(
+    (process.env.PUBLIC_APP_ORIGINS ?? "https://whappnus.online,https://www.whappnus.online")
+      .split(",")
+      .map(origin => origin.trim())
+      .filter(Boolean)
+  );
   app.use(express.json({ limit: "50mb" }));
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
   app.use("/api", (req, res, next) => {
     const startedAt = Date.now();
+    const origin = typeof req.headers.origin === "string" ? req.headers.origin : null;
+    if (origin && allowedOrigins.has(origin)) {
+      res.setHeader("Access-Control-Allow-Origin", origin);
+      res.setHeader("Access-Control-Allow-Credentials", "true");
+      res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+      res.setHeader("Access-Control-Allow-Headers", "Authorization,Content-Type,TRPC-Accept");
+      res.setHeader("Vary", "Origin");
+    }
     res.on("finish", () => {
       console.info("[API]", JSON.stringify({
         method: req.method,
         path: req.path,
         status: res.statusCode,
         durationMs: Date.now() - startedAt,
-        origin: typeof req.headers.origin === "string" ? req.headers.origin : null,
+        origin,
       }));
     });
+    if (req.method === "OPTIONS") {
+      if (origin && !allowedOrigins.has(origin)) return res.status(403).json({ error: "origin_not_allowed" });
+      return res.sendStatus(204);
+    }
     next();
   });
   registerStorageProxy(app);

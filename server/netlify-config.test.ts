@@ -1,23 +1,18 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
-const backend = "https://turnlab-cpdvt4bt.manus.space/api/:splat";
+const backend = "https://turnlab-cpdvt4bt.manus.space";
 
 describe("Netlify frontend-to-backend routing", () => {
-  it("places the API proxy before the SPA fallback in _redirects", () => {
+  it("keeps _redirects limited to the frontend SPA fallback", () => {
     const redirects = readFileSync("client/public/_redirects", "utf8").trim().split(/\r?\n/);
-    expect(redirects).toEqual([
-      `/api/* ${backend} 200`,
-      "/* /index.html 200",
-    ]);
+    expect(redirects).toEqual(["/* /index.html 200"]);
   });
 
-  it("declares the API proxy before the SPA fallback in netlify.toml", () => {
+  it("configures the public backend URL at Netlify build time", () => {
     const config = readFileSync("netlify.toml", "utf8");
-    const apiProxy = config.indexOf('from = "/api/*"');
-    const spaFallback = config.indexOf('from = "/*"');
-    expect(apiProxy).toBeGreaterThanOrEqual(0);
-    expect(spaFallback).toBeGreaterThan(apiProxy);
-    expect(config).toContain(`to = "${backend}"`);
+    expect(config).toContain("[build.environment]");
+    expect(config).toContain(`VITE_API_BASE_URL = "${backend}"`);
+    expect(config).not.toContain('from = "/api/*"');
   });
 });

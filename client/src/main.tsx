@@ -9,11 +9,12 @@ import { supabase } from "./lib/supabase";
 import "./index.css";
 
 const queryClient = new QueryClient();
+const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/+$/, "") ?? "";
 
 const trpcClient = trpc.createClient({
   links: [
     httpBatchLink({
-      url: "/api/trpc",
+      url: `${apiBaseUrl}/api/trpc`,
       transformer: superjson,
       async headers() {
         const { data } = await supabase.auth.getSession();
