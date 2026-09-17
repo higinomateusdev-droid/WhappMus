@@ -30,6 +30,19 @@ async function startServer() {
   const server = createServer(app);
   app.use(express.json({ limit: "50mb" }));
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
+  app.use("/api", (req, res, next) => {
+    const startedAt = Date.now();
+    res.on("finish", () => {
+      console.info("[API]", JSON.stringify({
+        method: req.method,
+        path: req.path,
+        status: res.statusCode,
+        durationMs: Date.now() - startedAt,
+        origin: typeof req.headers.origin === "string" ? req.headers.origin : null,
+      }));
+    });
+    next();
+  });
   registerStorageProxy(app);
   registerOAuthRoutes(app);
 
